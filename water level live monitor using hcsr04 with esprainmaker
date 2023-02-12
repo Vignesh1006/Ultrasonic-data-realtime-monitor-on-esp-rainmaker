@@ -1,0 +1,228 @@
+#include <WiFi.h>
+#include <RMaker.h>
+#include <RMakerDevice.h>
+#include <RMakerNode.h>
+#include <RMakerParam.h>
+#include <RMakerQR.h>
+#include <RMakerType.h>
+#include "WiFiProv.h"
+#include <SimpleTimer.h>
+#include <HCSR04.h>
+
+const char *service_name = "Vignesh";
+const char *pop = "12345678";
+
+
+// define the Chip Id
+uint32_t espChipId = 5;
+
+// define the Node Name
+char nodeName[] = "Vignesh";
+
+// define the Device Names
+
+char deviceName_1[] = "WATERLEVEL";
+
+static uint8_t wifiLed      = 2;   //D2
+static uint8_t gpio_reset   = 0;
+int MQ2_PIN   = 34;  //RX2
+int GREEN_LED   =  14;
+int RED_LED      = 25;
+int sensorThres = 400;
+#define TRIG_PIN 23 // ESP32 pin GIOP23 connected to Ultrasonic Sensor's TRIG pin
+#define ECHO_PIN 22 // ESP32 pin GIOP22 connected to Ultrasonic Sensor's ECHO pin
+
+
+#define DEFAULT_WATERLEVEL 0
+
+
+
+
+SimpleTimer Timer;
+
+
+static TemperatureSensor WATERLEVEL("WATERLEVEL");
+
+void initWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(service_name, pop);
+  Serial.print("Connecting to WiFi ..");
+  while (WiFi.status() != WL_CONNECTED) {
+    Serial.print('.');
+    delay(1000);
+  }
+  Serial.println(WiFi.localIP());
+}
+
+//bool GAS_STATE = false;
+bool pulseIn_STATE = false;
+uint32_t chipId = 0;
+
+void sysProvEvent(arduino_event_t *sys_event)
+{
+    switch (sys_event->event_id) {      
+        case ARDUINO_EVENT_PROV_START:
+#if CONFIG_IDF_TARGET_ESP32
+        Serial.printf("\nProvisioning Started with name \"%s\" and PoP \"%s\" on BLE\n", service_name, pop);
+        printQR(service_name, pop, "ble");
+#else
+        Serial.printf("\nProvisioning Started with name \"%s\" and PoP \"%s\" on SoftAP\n", service_name, pop);
+        printQR(service_name, pop, "softap");
+#endif        
+        break;
+        case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+        Serial.printf("\nConnected to Wi-Fi!\n");
+        digitalWrite(wifiLed, true);
+        break;
+    }
+}
+void write_callback(Device *device, Param *param, const param_val_t val, void *priv_data, write_ctx_t *ctx)
+{
+    const char *device_name = device->getDeviceName();
+    const char *param_name = param->getParamName();
+if (strcmp(param_name, "WATERLEVEL hp") == 0) {
+Serial.printf("Received value = %2.2f for %s - %s\n", val.val.f, device_name, param_name);
+pulseIn_STATE = val.val.f;
+param->updateAndReport(val);
+delay(100);
+}
+}
+    
+
+void setup()
+{
+    
+    Serial.begin(115200);
+    //mq2.begin();
+     
+    pinMode(wifiLed, OUTPUT);
+    pinMode(gpio_reset, INPUT);
+    pinMode(MQ2_PIN, INPUT);
+    pinMode(GREEN_LED, OUTPUT);
+  pinMode(RED_LED, OUTPUT);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT); 
+    digitalWrite(wifiLed, LOW);
+
+    Node my_node;    
+    my_node = RMaker.initNode("WhiteFlame");
+
+
+
+    
+    WATERLEVEL.addCb(write_callback);    
+
+my_node.addDevice(WATERLEVEL);
+    
+
+    Timer.setInterval(6000); 
+
+    //This is optional 
+    RMaker.enableOTA(OTA_USING_PARAMS);
+    //If you want to enable scheduling, set time zone for your region using setTimeZone(). 
+    //The list of available values are provided here https://rainmaker.espressif.com/docs/time-service.html
+    // RMaker.setTimeZone("Asia/Shanghai");
+    // Alternatively, enable the Timezone service and let the phone apps set the appropriate timezone
+    RMaker.enableTZService();
+    RMaker.enableSchedule();
+
+    //Service Name
+    for(int i=0; i<17; i=i+8) {
+      espChipId |= ((ESP.getEfuseMac() >> (40 - i)) & 0xff) << i;
+    }
+
+    Serial.printf("\nChip ID:  %d Service Name: %s\n", espChipId, service_name);
+
+    Serial.printf("\nStarting ESP-RainMaker\n");
+    RMaker.start();
+
+    WiFi.onEvent(sysProvEvent);
+#if CONFIG_IDF_TARGET_ESP32
+    WiFiProv.beginProvision(WIFI_PROV_SCHEME_BLE, WIFI_PROV_SCHEME_HANDLER_FREE_BTDM, WIFI_PROV_SECURITY_1, pop, service_name);
+#else
+    WiFiProv.beginProvision(WIFI_PROV_SCHEME_SOFTAP, WIFI_PROV_SCHEME_HANDLER_NONE, WIFI_PROV_SECURITY_1, pop, service_name);
+#endif
+
+  
+    WATERLEVEL.updateAndReportParam(ESP_RMAKER_DEF_POWER_NAME, false);
+}
+
+void loop()
+{
+    // Read GPIO0 (external button to reset device
+    if(digitalRead(gpio_reset) == LOW) { //Push button pressed
+        Serial.printf("Reset Button Pressed!\n");
+        // Key debounce handling
+        delay(100);
+        int startTime = millis();
+        while(digitalRead(gpio_reset) == LOW) delay(50);
+        int endTime = millis();
+
+        if ((endTime - startTime) > 10000) {
+          // If key pressed for more than 10secs, reset all
+          Serial.printf("Reset to factory.\n");
+          RMakerFactoryReset(2);
+        } else if ((endTime - startTime) > 3000) {
+          Serial.printf("Reset Wi-Fi.\n");
+          // If key pressed for more than 3secs, but less than 10, reset Wi-Fi
+          RMakerWiFiReset(2);
+        }
+          delay(100);
+    }
+    
+ float t = 0, h = 0, hp = 0;
+  
+  // Transmitting pulse
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  
+  // Waiting for pulse
+  t = pulseIn(ECHO_PIN, HIGH);
+  
+  // Calculating distance 
+  h = t / 58;
+ 
+  h = h - 6;  // offset correction
+  h = 50 - h;  // water height, 0 - 50 cm
+  
+  hp = 2 * h;  // distance in %, 0-100 %
+
+
+  Serial.print("WATERLEVEL - "); Serial.println(hp);
+  WATERLEVEL.updateAndReportParam("WATERLEVEL",hp);
+    if(hp>99) {
+      Serial.println("TANK FULL!");
+     esp_rmaker_raise_alert("TANK FULL."); 
+      //digitalWrite(BUZZER_PIN, HIGH);
+      //BUZZER_STATE = true;
+      //buzzer_timer = millis();
+  
+  // Sending to computer
+  Serial.print(hp);
+  // Serial.print(" cm\n");
+  Serial.print("\n");
+  
+  delay(1000);
+}
+  
+
+    if (WiFi.status() != WL_CONNECTED)
+    {
+      //Serial.println("WiFi Not Connected");
+      digitalWrite(wifiLed, false);
+    }
+    else
+    {
+      //Serial.println("WiFi Connected");
+      digitalWrite(wifiLed, true);
+      if (Timer.isReady()) { 
+        //Serial.println("Sending Sensor Data");
+        
+        Timer.reset();      // Reset a second timer
+      }
+    }
+ 
+}
